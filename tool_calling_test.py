@@ -125,7 +125,7 @@ while True:
 
                     for output in code_result:
                         if isinstance(output, dict) and 'type' in output and output['type'] == 'image_url':
-                            user_messages = {'role': 'user', 'content': [output]}
+                            user_messages.append({'role': 'user', 'content': [output]})
                         else:
                             tool_call_response["content"] += str(output) + "\n"
 
