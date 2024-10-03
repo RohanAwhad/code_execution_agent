@@ -1,114 +1,272 @@
+import pandas as pd
+from pypdf import PdfReader
 import dataclasses
-import openai
+import streamlit as st
+from typing import Optional, Dict, List, Any
+from pydantic import BaseModel, ValidationError
+import yaml
 import os
 import json
-import yaml
+import base64
+from io import BytesIO
+import openai
+from PIL import Image
+from typing import Any, Type
+from jupyter_client.manager import KernelManager
 
-from pydantic import BaseModel, ValidationError
-from typing import Optional, Dict, List
+kernel_manager: KernelManager = None
 
-import streamlit as st
+
+def execute_code_in_notebook(code: str) -> list[Any]:
+  if not code:
+    return []
+  global kernel_manager
+  if kernel_manager is None:
+    kernel_manager = KernelManager()
+    kernel_manager.start_kernel()
+
+  kernel_client = kernel_manager.client()
+  kernel_client.start_channels()
+  kernel_client.wait_for_ready()
+  code = "%matplotlib inline\n\n" + code
+  kernel_client.execute(code)
+
+  output_content: str = ""
+  outputs: list[Any] = []
+  while True:
+    try:
+      msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=5)
+      if msg['msg_type'] == 'execute_result':
+        outputs.append(msg['content']['data']['text/plain'])
+      elif msg['msg_type'] == 'display_data':
+        if 'image/png' in msg['content']['data']:
+          outputs.append({'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + msg['content']['data']['image/png']}})
+      elif msg['msg_type'] == 'stream':
+        output_content += msg['content']['text']
+      elif msg['msg_type'] == 'error':
+        outputs.append("\n".join(msg['content']['traceback']))
+    except Exception as e:
+      print(f"An error occurred: {e}")
+      break
+
+  if output_content:
+    outputs.append(output_content)
+  print(outputs)
+  return outputs
+
+
+def shutdown_kernel() -> None:
+  global kernel_manager
+  if kernel_manager is not None:
+    kernel_manager.shutdown_kernel()
+    kernel_manager = None
+
+
+# ===
+# LLM
+# ===
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "execute_code_in_notebook",
+        "description": "Execute Python code in a Jupyter notebook environment. The notebook state is preserved for the entire session of conversation so you can call previous function without defining them again.",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string", "description": "The Python code to be executed."}},
+                "required": ["code"]
+        }
+    }
+}]
 
 
 @dataclasses.dataclass
 class Message:
-    role: str
-    content: str
+  role: str
+  content: str | list[dict[str: str | dict[str, str]]]
 
-def llm_call(model: str, messages: List[Message]) -> str:
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    res = client.chat.completions.create(model=model, messages=[dataclasses.asdict(x) for x in messages], temperature=0.8, max_tokens=4096)
-    return res.choices[0].message.content
+
+def llm_call_with_tools(model: str, messages: list[Message]) -> dict[str, Any]:
+  history = []
+  for msg in messages:
+    if dataclasses.is_dataclass(msg):
+      history.append(dataclasses.asdict(msg))
+    else:
+      history.append(msg)
+  client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+  return client.chat.completions.create(
+      model=model,
+      messages=history,
+      tools=tools,
+      tool_choice="auto",
+      temperature=0.8,
+      max_tokens=4096
+  )
+
+
+# ===
+# Streamlit
+# ===
+def handle_file_upload(uploaded_file):
+  if uploaded_file is not None:
+    if 'uploaded_filename' in st.session_state and st.session_state.uploaded_filename == uploaded_file.name:
+      return
+
+    st.session_state['uploaded_filename'] = uploaded_file.name
+    print('this function was called')
+    file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+
+    if file_extension in ['.png', '.jpg', '.jpeg']:
+      file_bytes = uploaded_file.read()
+      image_data = base64.b64encode(file_bytes).decode('utf-8')
+      thumbnail = Image.open(BytesIO(file_bytes))
+      #st.image(thumbnail, caption='Uploaded Image', use_column_width=True)
+      st.session_state.messages.append(Message(role="user", content=[{'type': 'image_url', 'image_url': {
+                                       'url': f'data:image/{file_extension[1:]};base64,' + image_data}}]))
+      st.session_state.gpt_messages.append(Message(role="user", content=[{'type': 'image_url', 'image_url': {
+                                           'url': f'data:image/{file_extension[1:]};base64,' + image_data}}]))
+
+    elif file_extension == '.pdf':
+      pdf_reader = PdfReader(uploaded_file)
+      text_content = ""
+      for page in pdf_reader.pages:
+        text_content += page.extract_text() + "\n"
+      st.session_state.messages.append(Message(role="user", content=text_content))
+      st.session_state.gpt_messages.append(Message(role="user", content=text_content))
+
+    elif file_extension in ['.csv', '.xls', '.xlsx']:
+      file_path = f"./data/{uploaded_file.name}"
+      with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+      st.session_state.messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
+      st.session_state.gpt_messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
+
+    else:
+      file_path = f"./data/{uploaded_file.name}"
+      with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+      st.session_state.messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
+      st.session_state.gpt_messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
 
 
 def load_global_messages_from_disk() -> Dict[str, List[Message]]:
-    if os.path.exists("global_messages.json"):
-        with open("global_messages.json", "r") as file:
-            data = json.load(file)
-            return {k: [Message(**msg) for msg in v] for k, v in data.items()}
-    else:
-        with open("global_messages.json", "w") as file:
-            json.dump({}, file)
-        return {}
+  if os.path.exists("global_messages.json"):
+    with open("global_messages.json", "r") as file:
+      data = json.load(file)
+      return {k: [Message(**msg) for msg in v] for k, v in data.items()}
+  else:
+    with open("global_messages.json", "w") as file:
+      json.dump({}, file)
+    return {}
+
 
 def save_global_messages_to_disk(global_messages: Dict[str, List[Message]]) -> None:
-    with open("global_messages.json", "w") as file:
-        json.dump({k: [dataclasses.asdict(msg) for msg in v] for k, v in global_messages.items()}, file)
+  with open("global_messages.json", "w") as file:
+    json.dump({k: [dataclasses.asdict(msg) for msg in v] for k, v in global_messages.items()}, file)
+
 
 def load_conversation(key: str) -> None:
-    if key in st.session_state.global_messages:
-        st.session_state.messages = st.session_state.global_messages[key]
+  if key in st.session_state.global_messages:
+    st.session_state.messages = st.session_state.global_messages[key]
+    st.session_state.gpt_messages = st.session_state.global_messages[key]
+
 
 def create_messaging_window() -> None:
-    st.title("Chat with AI")
+  st.title("Chat with AI and Code Execution")
 
-    if 'global_messages' not in st.session_state:
-        st.session_state.global_messages: Dict[str, List[Message]] = load_global_messages_from_disk()
+  if 'global_messages' not in st.session_state:
+    st.session_state.global_messages: Dict[str, List[Message]] = load_global_messages_from_disk()
 
-    clear_chat_button: bool = st.sidebar.button("Clear Chat")
-    if clear_chat_button:
-        st.session_state.messages = []
+  clear_chat_button: bool = st.sidebar.button("Clear Chat")
+  if clear_chat_button:
+    st.session_state.messages = []
+    st.session_state.gpt_messages = []
 
-    # Initialize session state for messages if not already present
-    if 'messages' not in st.session_state:
-        st.session_state.messages: List[Message] = []
+  if 'messages' not in st.session_state:
+    st.session_state.messages: List[Message] = []
 
-    # List all keys in GLOBAL_MESSAGES in the sidebar
-    st.sidebar.write("Previous conversations:")
-    for key in st.session_state.global_messages.keys():
-        if st.sidebar.button(key, key=key, on_click=load_conversation, args=(key,)):
-            pass
+  if 'gpt_messages' not in st.session_state:
+    st.session_state.gpt_messages: List[Any] = []
 
-    # Display previous messages
-    for message in st.session_state.messages:
-        with st.chat_message(message.role):
-            st.write(message.content)
+  st.sidebar.write("Previous conversations:")
+  for key in st.session_state.global_messages.keys():
+    btn_name: str = key if len(key) < 20 else f'{key[:17]} ...'
+    btn_name = btn_name.ljust(21)
+    if st.sidebar.button(btn_name, key=key, on_click=load_conversation, args=(key,)):
+      pass
 
-    # File uploader
-    uploaded_file = st.file_uploader("Upload a file", type=["txt", "pdf", "doc", "docx"])
+  for message in st.session_state.messages:
+    if dataclasses.is_dataclass(message):
+      with st.chat_message(message.role):
+        if isinstance(message.content, str):
+          st.write(message.content)
+        elif isinstance(message.content, list):
+          for item in message.content:
+            if 'type' in item:
+              if item['type'] == 'text':
+                st.write(item['content'])
+              elif item['type'] == 'image_url':
+                image_data = base64.b64decode(item['image_url']['url'].split(",")[1])
+                image = Image.open(BytesIO(image_data))
+                st.image(image)
 
-    # User input
-    user_input: str = st.chat_input("Type your message here...")
+  uploaded_file = st.file_uploader("Choose a file", type=["png", "jpg", "jpeg", "pdf", "csv", "xls", "xlsx"])
+  handle_file_upload(uploaded_file)
 
-    if user_input or uploaded_file:
-        # Process user input
-        if user_input:
-            user_message_content = user_input
-        else:
-            user_message_content = "File uploaded: " + uploaded_file.name
+  user_input: str = st.chat_input("Type your message here...")
+  if user_input:
+    user_message_content = user_input
+    user_message = Message(role="user", content=user_message_content)
+    st.session_state.messages.append(user_message)
+    st.session_state.gpt_messages.append(user_message)
 
-        # Add user message to the conversation
-        user_message = Message(role="user", content=user_message_content)
-        st.session_state.messages.append(user_message)
+    if st.session_state.messages:
+      for msg in st.session_state.messages:
+        if isinstance(msg.content, str):
+          first_message_content: str = msg.content
+          break
 
-        # Update session state 'global_messages' with the current conversation
-        if st.session_state.messages:
-            first_message_content: str = st.session_state.messages[0].content
-            st.session_state.global_messages[first_message_content] = st.session_state.messages
-            save_global_messages_to_disk(st.session_state.global_messages)
+    with st.chat_message("user"):
+      st.write(user_message_content)
 
-        # Display user message
-        with st.chat_message("user"):
-            st.write(user_message_content)
+    for _ in range(3):
+      ai_response = llm_call_with_tools("gpt-4o-2024-08-06", st.session_state.gpt_messages)
+      assistant_message = ai_response.choices[0].message
+      if assistant_message.tool_calls:
+        st.session_state.gpt_messages.append(assistant_message)
+        for function_call in assistant_message.tool_calls:
+          if function_call.function.name == "execute_code_in_notebook":
+            args = json.loads(function_call.function.arguments)
+            code_result = execute_code_in_notebook(args.get('code', ''))
+            # Prepare tool response based on the result
+            tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
+            user_messages = []
+            for output in code_result:
+              if isinstance(output, dict) and 'type' in output and output['type'] == 'image_url':
+                user_messages.append(Message('user', [output]))
+              else:
+                tool_call_response["content"] += str(output) + "\n"
+            # If no non-image output, still add an empty tool call response
+            if not tool_call_response["content"].strip:
+              tool_call_response["content"] = "No textual output from execution."
 
-        # If a file was uploaded, you might want to process it here
-        if uploaded_file:
-            # Read and process the file content
-            file_contents = uploaded_file.read()
-            # You can add your file processing logic here
-            # For example, you could add the file contents to the message
-            st.session_state.messages.append(Message(role="user", content=f"File contents: {file_contents}"))
-
-        # Generate AI response
-        ai_response: str = llm_call("gpt-4o-2024-08-06", st.session_state.messages)
-        ai_message = Message(role="assistant", content=ai_response)
-        st.session_state.messages.append(ai_message)
-
-        # Display AI response
+            st.session_state.gpt_messages.extend([tool_call_response] + user_messages)
+            st.session_state.messages.extend(user_messages)
+            if user_messages:
+              for msg in user_messages:
+                for item in msg.content:
+                  image_data = base64.b64decode(item['image_url']['url'].split(",")[1])
+                  image = Image.open(BytesIO(image_data))
+                  st.image(image)
+      else:
+        st.session_state.messages.append(Message(role="assistant", content=assistant_message.content))
+        st.session_state.gpt_messages.append(Message(role="assistant", content=assistant_message.content))
         with st.chat_message("assistant"):
-            st.write(ai_response)
+          st.write(assistant_message.content)
+        break
 
-# Run the messaging window
+    st.session_state.global_messages[first_message_content] = st.session_state.messages
+    save_global_messages_to_disk(st.session_state.global_messages)
+
+
 if __name__ == "__main__":
-    create_messaging_window()
-
+  create_messaging_window()
