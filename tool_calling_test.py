@@ -1,8 +1,10 @@
 import jupyter_client
-from jupyter_client.manager import KernelManager
 import json
+import openai
 import time
-from typing import Dict, Any
+
+from typing import Any, Dict, List
+from jupyter_client.manager import KernelManager
 
 # Global variable to hold the kernel manager
 kernel_manager: KernelManager = None
@@ -57,19 +59,10 @@ def shutdown_kernel():
         kernel_manager.shutdown_kernel()
         kernel_manager = None
 
-import openai
-import json
-from typing import List, Dict
+# ===
+# LLM
+# ===
 
-
-import base64
-from pathlib import Path
-
-
-# Initialize the OpenAI client
-client = openai.OpenAI()
-
-# Define the function for the tool
 tools = [
     {
         "type": "function",
@@ -89,13 +82,8 @@ tools = [
         }
     }
 ]
-
-# Create a conversation with the AI
-messages = [
-    {"role": "system", "content": "You are a helpful assistant that can execute Python code in a Jupyter notebook environment."},
-]
-
-# Make the API call
+client = openai.OpenAI()
+messages = [{"role": "system", "content": "You are a helpful assistant that can execute Python code in a Jupyter notebook environment."}]
 while True:
     try:
         user_input = input('Enter your message:')
