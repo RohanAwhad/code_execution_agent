@@ -14,10 +14,19 @@ import openai
 from PIL import Image
 from typing import Any, Type
 from jupyter_client.manager import KernelManager
+import requests
 
 
-kernel_manager: KernelManager = None
+kernel_manager = None
 kernel_client = None
+if 'kernel_manager' not in st.session_state:
+  st.session_state.kernel_manager: KernelManager = None
+else:
+  kernel_manager = st.session_state.kernel_manager
+if 'kernel_client' not in st.session_state:
+  st.session_state.kernel_client = None
+else:
+  kernel_client = st.session_state.kernel_client
 
 
 def execute_code_in_notebook(code: str) -> list[Any]:
@@ -25,14 +34,15 @@ def execute_code_in_notebook(code: str) -> list[Any]:
     return []
   print('Code:')
   print(code)
-
   global kernel_manager, kernel_client
   if kernel_manager is None:
     kernel_manager = KernelManager()
     kernel_manager.start_kernel()
+    st.session_state.kernel_manager = kernel_manager
 
   if kernel_client is None:
     kernel_client = kernel_manager.client()
+    st.session_state.kernel_client = kernel_client
     kernel_client.start_channels()
     kernel_client.wait_for_ready()
     code = "%matplotlib inline\n\n" + code
@@ -66,7 +76,79 @@ def shutdown_kernel() -> None:
   global kernel_manager
   if kernel_manager is not None:
     kernel_manager.shutdown_kernel()
-    kernel_manager = None
+    st.session_state.kernel_manager = None
+
+
+# ===
+# Brave Search
+# ===
+
+@dataclasses.dataclass
+class SearchResult:
+  """
+  Dataclass to represent the search results from Brave Search API.
+
+  :param title: The title of the search result.
+  :param url: The URL of the search result.
+  :param description: A brief description of the search result.
+  :param extra_snippets: Additional snippets related to the search result.
+  """
+  title: str
+  url: str
+  description: str
+  extra_snippets: list
+
+  def __str__(self) -> str:
+    """
+    Returns a string representation of the search result.
+
+    :return: A string representation of the search result.
+    """
+    return (
+        f"Title: {self.title}\n"
+        f"URL: {self.url}\n"
+        f"Description: {self.description}\n"
+        f"Extra Snippets: {', '.join(self.extra_snippets)}"
+    )
+
+
+def search_brave(query: str, count: int = 10) -> List[SearchResult]:
+  """
+  Searches the web using Brave Search API and returns structured search results.
+
+  :param query: The search query string.
+  :param count: The number of search results to return.
+  :return: A list of SearchResult objects containing the search results.
+  """
+  if not query:
+    return []
+  url = "https://api.search.brave.com/res/v1/web/search"
+  headers = {
+      "Accept": "application/json",
+      "X-Subscription-Token": os.environ['BRAVE_SEARCH_AI_API_KEY']
+  }
+  params = {
+      "q": query,
+      "count": count
+  }
+
+  response = requests.get(url, headers=headers, params=params)
+  response.raise_for_status()  # Raises an exception for HTTP errors
+  results_json = response.json()
+
+  results = []
+  for item in results_json.get('web', {}).get('results', []):
+    result = SearchResult(
+        title=item.get('title', ''),
+        url=item.get('url', ''),
+        description=item.get('description', ''),
+        extra_snippets=item.get('extra_snippets', [])
+    )
+    results.append(result)
+
+  print('Search results')
+  print(results)
+  return results
 
 
 # ===
@@ -84,6 +166,20 @@ tools = [{
         }
     }
 }]
+tools.append({
+    "type": "function",
+    "function": {
+        "name": "search_brave",
+        "description": "Search the web using Brave Search API and returns structured search results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query string."},
+            },
+            "required": ["query"]
+        }
+    }
+})
 
 
 @dataclasses.dataclass
@@ -99,6 +195,9 @@ def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding 
       history.append(dataclasses.asdict(msg))
     else:
       history.append(msg)
+
+  print('Latest message to llm:')
+  print(history[-1])
   client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
   return client.chat.completions.create(
       model=model,
@@ -188,12 +287,12 @@ def create_messaging_window() -> None:
   if clear_chat_button:
     st.session_state.messages = []
     st.session_state.gpt_messages = []
-    if kernel_client is not None:
-      kernel_client.stop_channels()
-    if kernel_manager is not None:
-      kernel_manager.shutdown_kernel()
-    kernel_client = None
-    kernel_manager = None
+    if st.session_state.kernel_client is not None:
+      st.session_state.kernel_client.stop_channels()
+    if st.session_state.kernel_manager is not None:
+      st.session_state.kernel_manager.shutdown_kernel()
+    st.session_state.kernel_client = None
+    st.session_state.kernel_manager = None
 
   if 'messages' not in st.session_state:
     st.session_state.messages: List[Message] = []
@@ -228,6 +327,7 @@ def create_messaging_window() -> None:
 
   user_input: str = st.chat_input("Type your message here...")
   if user_input:
+    search_sources = []
     user_message_content = user_input
     user_message = Message(role="user", content=user_message_content)
     st.session_state.messages.append(user_message)
@@ -242,7 +342,7 @@ def create_messaging_window() -> None:
     with st.chat_message("user"):
       st.write(user_message_content)
 
-    for _ in range(3):
+    while True:
       ai_response = llm_call_with_tools("gpt-4o-2024-08-06", st.session_state.gpt_messages)
       assistant_message = ai_response.choices[0].message
       if assistant_message.tool_calls:
@@ -272,11 +372,27 @@ def create_messaging_window() -> None:
                   image = Image.open(BytesIO(image_data))
                   with st.chat_message('user'):  # this is originally tool
                     st.image(image)
+          elif function_call.function.name == "search_brave":
+            args = json.loads(function_call.function.arguments)
+            search_results = search_brave(args.get('query', ''), args.get('count', 10))
+            # Prepare tool response based on the search results
+            tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
+            search_sources = []
+            for result in search_results:
+              tool_call_response["content"] += str(result) + "\n\n"
+              search_sources.append(result.url)  # Collect URLs
+            st.session_state.gpt_messages.append(tool_call_response)
       else:
         st.session_state.messages.append(Message(role="assistant", content=assistant_message.content))
         st.session_state.gpt_messages.append(Message(role="assistant", content=assistant_message.content))
+        if len(search_sources):
+          ret = "\n\nSource URLs:"
+          for url in search_sources:
+            ret += f"\n- {url}"
+          search_sources = []
+          st.session_state.messages[-1].content += ret
         with st.chat_message("assistant"):
-          st.write(assistant_message.content)
+          st.write(st.session_state.messages[-1].content)
         break
 
     st.session_state.global_messages[first_message_content] = st.session_state.messages
@@ -287,15 +403,16 @@ if __name__ == "__main__":
   try:
     create_messaging_window()
   except Exception as e:
+    print('Error ocurred in messaging window creation')
     print(e)
   finally:
     try:
-      if kernel_client is not None:
-        kernel_client.stop_channels()
+      if st.session_state.kernel_client is not None:
+        st.session_state.kernel_client.stop_channels()
     except Exception as e:
-      print(e)
+      print(f"An error occurred while stopping channels: {e}")
     try:
-      if kernel_manager is not None:
-        kernel_manager.shutdown_kernel()
+      shutdown_kernel()
     except Exception as e:
+      print(f"An error occurred while shutting down the kernel: {e}")
       print(e)
