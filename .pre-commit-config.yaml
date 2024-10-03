@@ -10,7 +10,7 @@ repos:
     rev: v1.6.0
     hooks:
     -   id: autopep8
-        args: ["--in-place", "--indent-size=2", "--max-line-length=120"]
+        args: ["--in-place", "--indent-size=2", "--max-line-length=150"]
         name: autoformat
 -   repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.2
