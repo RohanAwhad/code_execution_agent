@@ -6,6 +6,7 @@ from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, ValidationError
 import yaml
 import os
+import copy
 import json
 import base64
 from io import BytesIO
@@ -14,23 +15,29 @@ from PIL import Image
 from typing import Any, Type
 from jupyter_client.manager import KernelManager
 
+
 kernel_manager: KernelManager = None
+kernel_client = None
 
 
 def execute_code_in_notebook(code: str) -> list[Any]:
   if not code:
     return []
-  global kernel_manager
+  print('Code:')
+  print(code)
+
+  global kernel_manager, kernel_client
   if kernel_manager is None:
     kernel_manager = KernelManager()
     kernel_manager.start_kernel()
 
-  kernel_client = kernel_manager.client()
-  kernel_client.start_channels()
-  kernel_client.wait_for_ready()
-  code = "%matplotlib inline\n\n" + code
-  kernel_client.execute(code)
+  if kernel_client is None:
+    kernel_client = kernel_manager.client()
+    kernel_client.start_channels()
+    kernel_client.wait_for_ready()
+    code = "%matplotlib inline\n\n" + code
 
+  kernel_client.execute(code)
   output_content: str = ""
   outputs: list[Any] = []
   while True:
@@ -82,10 +89,10 @@ tools = [{
 @dataclasses.dataclass
 class Message:
   role: str
-  content: str | list[dict[str: str | dict[str, str]]]
+  content: str | list[dict[str, str | dict[str, str]]]
 
 
-def llm_call_with_tools(model: str, messages: list[Message]) -> dict[str, Any]:
+def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding openai chat completion object is crazy
   history = []
   for msg in messages:
     if dataclasses.is_dataclass(msg):
@@ -106,7 +113,7 @@ def llm_call_with_tools(model: str, messages: list[Message]) -> dict[str, Any]:
 # ===
 # Streamlit
 # ===
-def handle_file_upload(uploaded_file):
+def handle_file_upload(uploaded_file) -> None:
   if uploaded_file is not None:
     if 'uploaded_filename' in st.session_state and st.session_state.uploaded_filename == uploaded_file.name:
       return
@@ -167,10 +174,11 @@ def save_global_messages_to_disk(global_messages: Dict[str, List[Message]]) -> N
 def load_conversation(key: str) -> None:
   if key in st.session_state.global_messages:
     st.session_state.messages = st.session_state.global_messages[key]
-    st.session_state.gpt_messages = st.session_state.global_messages[key]
+    st.session_state.gpt_messages = copy.deepcopy(st.session_state.global_messages[key])
 
 
 def create_messaging_window() -> None:
+  global kernel_client, kernel_manager
   st.title("Chat with AI and Code Execution")
 
   if 'global_messages' not in st.session_state:
@@ -180,6 +188,12 @@ def create_messaging_window() -> None:
   if clear_chat_button:
     st.session_state.messages = []
     st.session_state.gpt_messages = []
+    if kernel_client is not None:
+      kernel_client.stop_channels()
+    if kernel_manager is not None:
+      kernel_manager.shutdown_kernel()
+    kernel_client = None
+    kernel_manager = None
 
   if 'messages' not in st.session_state:
     st.session_state.messages: List[Message] = []
@@ -256,7 +270,8 @@ def create_messaging_window() -> None:
                 for item in msg.content:
                   image_data = base64.b64decode(item['image_url']['url'].split(",")[1])
                   image = Image.open(BytesIO(image_data))
-                  st.image(image)
+                  with st.chat_message('user'):  # this is originally tool
+                    st.image(image)
       else:
         st.session_state.messages.append(Message(role="assistant", content=assistant_message.content))
         st.session_state.gpt_messages.append(Message(role="assistant", content=assistant_message.content))
@@ -269,4 +284,18 @@ def create_messaging_window() -> None:
 
 
 if __name__ == "__main__":
-  create_messaging_window()
+  try:
+    create_messaging_window()
+  except Exception as e:
+    print(e)
+  finally:
+    try:
+      if kernel_client is not None:
+        kernel_client.stop_channels()
+    except Exception as e:
+      print(e)
+    try:
+      if kernel_manager is not None:
+        kernel_manager.shutdown_kernel()
+    except Exception as e:
+      print(e)
