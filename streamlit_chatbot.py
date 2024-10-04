@@ -196,10 +196,10 @@ def on_shutdown():
 
 atexit.register(on_shutdown)
 
-if 'kernel_manager' not in st.session_state:
+if 'kernel_manager' not in st.session_state or st.session_state.kernel_manager is None:
   st.session_state.kernel_manager = KernelManager()
   st.session_state.kernel_manager.start_kernel()
-if 'kernel_client' not in st.session_state:
+if 'kernel_client' not in st.session_state or st.session_state.kernel_client is None:
   st.session_state.kernel_client = st.session_state.kernel_manager.client()
   st.session_state.kernel_client.start_channels()
   st.session_state.kernel_client.wait_for_ready()
@@ -331,14 +331,16 @@ def create_messaging_window() -> None:
       st.write(user_message_content)
 
     while True:
-      ai_response = llm_call_with_tools("gpt-4o-2024-08-06", st.session_state.gpt_messages)
+      with st.spinner('Calling AI ...'):
+        ai_response = llm_call_with_tools("gpt-4o-2024-08-06", st.session_state.gpt_messages)
       assistant_message = ai_response.choices[0].message
       if assistant_message.tool_calls:
         st.session_state.gpt_messages.append(assistant_message)
         for function_call in assistant_message.tool_calls:
+          args = json.loads(function_call.function.arguments)
           if function_call.function.name == "execute_code_in_notebook":
-            args = json.loads(function_call.function.arguments)
-            code_result = execute_code_in_notebook(args.get('code', ''), st.session_state.kernel_manager, st.session_state.kernel_client)
+            with st.spinner('Executing Code ...'):
+              code_result = execute_code_in_notebook(args.get('code', ''), st.session_state.kernel_manager, st.session_state.kernel_client)
             # Prepare tool response based on the result
             tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
             user_messages = []
@@ -361,14 +363,20 @@ def create_messaging_window() -> None:
                   with st.chat_message('user'):  # this is originally tool
                     st.image(image)
           elif function_call.function.name == "search_brave":
-            args = json.loads(function_call.function.arguments)
-            search_results = search_brave(args.get('query', ''), args.get('count', 10))
+            with st.spinner('Searching Internet ...'):
+              try:
+                search_results = search_brave(args.get('query', ''), args.get('count', 10))
+              except Exception as e:
+                search_results = e
             # Prepare tool response based on the search results
             tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
             search_sources = []
-            for result in search_results:
-              tool_call_response["content"] += str(result) + "\n\n"
-              search_sources.append(result.url)  # Collect URLs
+            if isinstance(search_results, list):
+              for result in search_results:
+                tool_call_response["content"] += str(result) + "\n\n"
+                search_sources.append(result.url)  # Collect URLs
+            else:
+              tool_call_response['content'] = search_results
             st.session_state.gpt_messages.append(tool_call_response)
       else:
         st.session_state.messages.append(Message(role="assistant", content=assistant_message.content))
