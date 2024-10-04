@@ -1,3 +1,4 @@
+import atexit
 import pandas as pd
 from pypdf import PdfReader
 import dataclasses
@@ -17,42 +18,18 @@ from jupyter_client.manager import KernelManager
 import requests
 
 
-kernel_manager = None
-kernel_client = None
-if 'kernel_manager' not in st.session_state:
-  st.session_state.kernel_manager: KernelManager = None
-else:
-  kernel_manager = st.session_state.kernel_manager
-if 'kernel_client' not in st.session_state:
-  st.session_state.kernel_client = None
-else:
-  kernel_client = st.session_state.kernel_client
-
-
-def execute_code_in_notebook(code: str) -> list[Any]:
+def execute_code_in_notebook(code: str, kernel_manager: KernelManager, kernel_client) -> list[Any]:
   if not code:
     return []
   print('Code:')
   print(code)
-  global kernel_manager, kernel_client
-  if kernel_manager is None:
-    kernel_manager = KernelManager()
-    kernel_manager.start_kernel()
-    st.session_state.kernel_manager = kernel_manager
-
-  if kernel_client is None:
-    kernel_client = kernel_manager.client()
-    st.session_state.kernel_client = kernel_client
-    kernel_client.start_channels()
-    kernel_client.wait_for_ready()
-    code = "%matplotlib inline\n\n" + code
-
+  code = "%matplotlib inline\n\n" + code
   kernel_client.execute(code)
   output_content: str = ""
   outputs: list[Any] = []
   while True:
     try:
-      msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=5)
+      msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=30)
       if msg['msg_type'] == 'execute_result':
         outputs.append(msg['content']['data']['text/plain'])
       elif msg['msg_type'] == 'display_data':
@@ -72,11 +49,11 @@ def execute_code_in_notebook(code: str) -> list[Any]:
   return outputs
 
 
-def shutdown_kernel() -> None:
-  global kernel_manager
+def shutdown_kernel(kernel_manager, kernel_client) -> None:
+  if kernel_client is not None:
+    kernel_client.stop_channels()
   if kernel_manager is not None:
     kernel_manager.shutdown_kernel()
-    st.session_state.kernel_manager = None
 
 
 # ===
@@ -165,8 +142,7 @@ tools = [{
                 "required": ["code"]
         }
     }
-}]
-tools.append({
+}, {
     "type": "function",
     "function": {
         "name": "search_brave",
@@ -179,7 +155,7 @@ tools.append({
             "required": ["query"]
         }
     }
-})
+}]
 
 
 @dataclasses.dataclass
@@ -212,13 +188,29 @@ def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding 
 # ===
 # Streamlit
 # ===
+
+
+def on_shutdown():
+  shutdown_kernel(st.session_state.kernel_manager, st.session_state.kernel_client)
+
+
+atexit.register(on_shutdown)
+
+if 'kernel_manager' not in st.session_state:
+  st.session_state.kernel_manager = KernelManager()
+  st.session_state.kernel_manager.start_kernel()
+if 'kernel_client' not in st.session_state:
+  st.session_state.kernel_client = st.session_state.kernel_manager.client()
+  st.session_state.kernel_client.start_channels()
+  st.session_state.kernel_client.wait_for_ready()
+
+
 def handle_file_upload(uploaded_file) -> None:
   if uploaded_file is not None:
     if 'uploaded_filename' in st.session_state and st.session_state.uploaded_filename == uploaded_file.name:
       return
 
     st.session_state['uploaded_filename'] = uploaded_file.name
-    print('this function was called')
     file_extension = os.path.splitext(uploaded_file.name)[1].lower()
 
     if file_extension in ['.png', '.jpg', '.jpeg']:
@@ -277,7 +269,6 @@ def load_conversation(key: str) -> None:
 
 
 def create_messaging_window() -> None:
-  global kernel_client, kernel_manager
   st.title("Chat with AI and Code Execution")
 
   if 'global_messages' not in st.session_state:
@@ -287,12 +278,9 @@ def create_messaging_window() -> None:
   if clear_chat_button:
     st.session_state.messages = []
     st.session_state.gpt_messages = []
-    if st.session_state.kernel_client is not None:
-      st.session_state.kernel_client.stop_channels()
-    if st.session_state.kernel_manager is not None:
-      st.session_state.kernel_manager.shutdown_kernel()
-    st.session_state.kernel_client = None
+    shutdown_kernel(st.session_state.kernel_manager, st.session_state.kernel_client)
     st.session_state.kernel_manager = None
+    st.session_state.kernel_client = None
 
   if 'messages' not in st.session_state:
     st.session_state.messages: List[Message] = []
@@ -350,7 +338,7 @@ def create_messaging_window() -> None:
         for function_call in assistant_message.tool_calls:
           if function_call.function.name == "execute_code_in_notebook":
             args = json.loads(function_call.function.arguments)
-            code_result = execute_code_in_notebook(args.get('code', ''))
+            code_result = execute_code_in_notebook(args.get('code', ''), st.session_state.kernel_manager, st.session_state.kernel_client)
             # Prepare tool response based on the result
             tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
             user_messages = []
@@ -399,20 +387,4 @@ def create_messaging_window() -> None:
     save_global_messages_to_disk(st.session_state.global_messages)
 
 
-if __name__ == "__main__":
-  try:
-    create_messaging_window()
-  except Exception as e:
-    print('Error ocurred in messaging window creation')
-    print(e)
-  finally:
-    try:
-      if st.session_state.kernel_client is not None:
-        st.session_state.kernel_client.stop_channels()
-    except Exception as e:
-      print(f"An error occurred while stopping channels: {e}")
-    try:
-      shutdown_kernel()
-    except Exception as e:
-      print(f"An error occurred while shutting down the kernel: {e}")
-      print(e)
+create_messaging_window()
