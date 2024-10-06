@@ -162,6 +162,7 @@ tools = [{
 class Message:
   role: str
   content: str | list[dict[str, str | dict[str, str]]]
+  collapsible: bool = False
 
 
 def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding openai chat completion object is crazy
@@ -299,7 +300,11 @@ def create_messaging_window() -> None:
     if dataclasses.is_dataclass(message):
       with st.chat_message(message.role):
         if isinstance(message.content, str):
-          st.write(message.content)
+          if message.collapsible:
+            with st.expander("Click to see code"):
+              st.write(message.content)
+          else:
+            st.write(message.content)
         elif isinstance(message.content, list):
           for item in message.content:
             if 'type' in item:
@@ -339,8 +344,13 @@ def create_messaging_window() -> None:
         for function_call in assistant_message.tool_calls:
           args = json.loads(function_call.function.arguments)
           if function_call.function.name == "execute_code_in_notebook":
+            code = args.get('code', '')
+            display_code = f'```python\n{code}\n```'
+            st.session_state.messages.append(Message('assistant', display_code, collapsible=True))
             with st.spinner('Executing Code ...'):
-              code_result = execute_code_in_notebook(args.get('code', ''), st.session_state.kernel_manager, st.session_state.kernel_client)
+              with st.expander("Click to see code"):
+                st.write(display_code)
+              code_result = execute_code_in_notebook(code, st.session_state.kernel_manager, st.session_state.kernel_client)
             # Prepare tool response based on the result
             tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
             user_messages = []
