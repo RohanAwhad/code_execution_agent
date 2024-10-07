@@ -29,7 +29,7 @@ def execute_code_in_notebook(code: str, kernel_manager: KernelManager, kernel_cl
   outputs: list[Any] = []
   while True:
     try:
-      msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=30)
+      msg: dict[str, Any] = kernel_client.get_iopub_msg()
       if msg['msg_type'] == 'execute_result':
         outputs.append(msg['content']['data']['text/plain'])
       elif msg['msg_type'] == 'display_data':
@@ -39,6 +39,9 @@ def execute_code_in_notebook(code: str, kernel_manager: KernelManager, kernel_cl
         output_content += msg['content']['text']
       elif msg['msg_type'] == 'error':
         outputs.append("\n".join(msg['content']['traceback']))
+      if msg['msg_type'] == 'status':
+        if msg['content']['execution_state'] == 'idle':
+          break
     except Exception as e:
       print(f"An error occurred: {e}")
       break
@@ -169,7 +172,7 @@ def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding 
   history = []
   for msg in messages:
     if dataclasses.is_dataclass(msg):
-      history.append(dataclasses.asdict(msg))
+      history.append(dict(role=msg.role, content=msg.content))
     else:
       history.append(msg)
 
@@ -364,6 +367,10 @@ def create_messaging_window() -> None:
               tool_call_response["content"] = "No textual output from execution."
 
             st.session_state.gpt_messages.extend([tool_call_response] + user_messages)
+            tool_call_out_display = f'```bash\n{tool_call_response["content"]}\n```'
+            st.session_state.messages[-1].content += '\n' + tool_call_out_display
+            with st.expander("See Output"):
+              st.write(tool_call_out_display)
             st.session_state.messages.extend(user_messages)
             if user_messages:
               for msg in user_messages:
