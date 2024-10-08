@@ -1,3 +1,11 @@
 #!/bin/zsh
 
-docker build -t code_execution_agent . && docker run -p8501:8501 --rm -e OPENAI_API_KEY=$OPENAI_API_KEY code_execution_agent
+
+if [ ! -d "data" ]; then
+    mkdir data
+fi
+if [ ! -d "history" ]; then
+    mkdir history
+fi
+docker build -t code_execution_agent . && docker run -p8501:8501 --rm -e OPENAI_API_KEY=$OPENAI_API_KEY -v "$(pwd)/data:/app/data" -v "$(pwd)/history:/app/history" code_execution_agent
+

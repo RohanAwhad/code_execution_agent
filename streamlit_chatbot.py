@@ -16,6 +16,7 @@ from PIL import Image
 from typing import Any, Type
 from jupyter_client.manager import KernelManager
 import requests
+import time
 
 
 def execute_code_in_notebook(code: str, kernel_manager: KernelManager, kernel_client) -> list[Any]:
@@ -242,6 +243,11 @@ def handle_file_upload(uploaded_file) -> None:
       st.session_state.messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
       st.session_state.gpt_messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
 
+    elif file_extension in ['.txt', ]:
+      text_content = uploaded_file.getvalue().decode('utf-8')
+      st.session_state.messages.append(Message(role="user", content=text_content))
+      st.session_state.gpt_messages.append(Message(role="user", content=text_content))
+
     else:
       file_path = f"./data/{uploaded_file.name}"
       with open(file_path, "wb") as f:
@@ -250,19 +256,20 @@ def handle_file_upload(uploaded_file) -> None:
       st.session_state.gpt_messages.append(Message(role="user", content=f"Stored {uploaded_file.name} in the ./data directory."))
 
 
+
 def load_global_messages_from_disk() -> Dict[str, List[Message]]:
-  if os.path.exists("global_messages.json"):
-    with open("global_messages.json", "r") as file:
+  if os.path.exists("./history/global_messages.json"):
+    with open("./history/global_messages.json", "r") as file:
       data = json.load(file)
       return {k: [Message(**msg) for msg in v] for k, v in data.items()}
   else:
-    with open("global_messages.json", "w") as file:
+    with open("./history/global_messages.json", "w") as file:
       json.dump({}, file)
     return {}
 
 
 def save_global_messages_to_disk(global_messages: Dict[str, List[Message]]) -> None:
-  with open("global_messages.json", "w") as file:
+  with open("./history/global_messages.json", "w") as file:
     json.dump({k: [dataclasses.asdict(msg) for msg in v] for k, v in global_messages.items()}, file)
 
 
@@ -270,6 +277,7 @@ def load_conversation(key: str) -> None:
   if key in st.session_state.global_messages:
     st.session_state.messages = st.session_state.global_messages[key]
     st.session_state.gpt_messages = copy.deepcopy(st.session_state.global_messages[key])
+    st.session_state.chat_session_key = key
 
 
 def create_messaging_window() -> None:
@@ -285,6 +293,7 @@ def create_messaging_window() -> None:
     shutdown_kernel(st.session_state.kernel_manager, st.session_state.kernel_client)
     st.session_state.kernel_manager = None
     st.session_state.kernel_client = None
+    st.session_state.chat_session_key = None
 
   if 'messages' not in st.session_state:
     st.session_state.messages: List[Message] = []
@@ -318,7 +327,7 @@ def create_messaging_window() -> None:
                 image = Image.open(BytesIO(image_data))
                 st.image(image)
 
-  uploaded_file = st.file_uploader("Choose a file", type=["png", "jpg", "jpeg", "pdf", "csv", "xls", "xlsx"])
+  uploaded_file = st.file_uploader("Choose a file", type=["png", "jpg", "jpeg", "pdf", "csv", "xls", "xlsx", 'txt'])
   handle_file_upload(uploaded_file)
 
   user_input: str = st.chat_input("Type your message here...")
@@ -329,10 +338,11 @@ def create_messaging_window() -> None:
     st.session_state.messages.append(user_message)
     st.session_state.gpt_messages.append(user_message)
 
-    if st.session_state.messages:
+    # get key for chat session
+    if ('chat_session_key' not in st.session_state or st.session_state.chat_session_key is None) and st.session_state.messages:
       for msg in st.session_state.messages:
         if isinstance(msg.content, str):
-          first_message_content: str = msg.content
+          st.session_state.chat_session_key: str = msg.content + str(int(time.time()))
           break
 
     with st.chat_message("user"):
@@ -408,7 +418,7 @@ def create_messaging_window() -> None:
           st.write(st.session_state.messages[-1].content)
         break
 
-    st.session_state.global_messages[first_message_content] = st.session_state.messages
+    st.session_state.global_messages[st.session_state.chat_session_key] = st.session_state.messages
     save_global_messages_to_disk(st.session_state.global_messages)
 
 
