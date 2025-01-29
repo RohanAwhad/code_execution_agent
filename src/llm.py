@@ -46,37 +46,36 @@ class Message:
   content: str | List[Dict[str, str]]
   collapsible: bool = False
 
-
 class ToolHandler:
   @staticmethod
   def handle_code(function_call: Any, kernel_client: Any) -> Dict:
-    args = function_call.input  # Updated to use ToolUseBlock input directly
+    args = function_call.input
     code = args.get('code', '')
     display_code = f'```python\n{code}\n```'
     
     code_result = execute_code_in_notebook(code, kernel_client)
-    tool_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
+    tool_output = ""
     user_messages = []
 
     for output in code_result:
       if isinstance(output, dict) and output.get('type') == 'image_url':
         user_messages.append(Message('user', [output]))
       else:
-        tool_response["content"] += str(output) + "\n"
+        tool_output += str(output) + "\n"
 
-    if not tool_response["content"].strip():
-      tool_response["content"] = "No textual output from execution."
+    if not tool_output.strip():
+      tool_output = "No textual output from execution."
 
     return {
       'code': code,
       'display_code': display_code,
-      'tool_response': tool_response,
+      'tool_output': tool_output,
       'user_messages': user_messages
     }
 
   @staticmethod
   def handle_search(function_call: Any) -> Dict:
-    args = function_call.input  # Updated to use ToolUseBlock input directly
+    args = function_call.input
     try:
       results = search_brave(args.get('query', ''))
       content = "\n\n".join(str(r) for r in results)
@@ -86,11 +85,7 @@ class ToolHandler:
       sources = []
 
     return {
-      'tool_response': {
-        "role": "tool",
-        "tool_call_id": function_call.id,
-        "content": content
-      },
+      'tool_output': content,
       'search_sources': sources
     }
 
@@ -104,12 +99,23 @@ class LLMHandler:
     history = []
     for msg in messages:
       if dataclasses.is_dataclass(msg):
-        history.append({
-          "role": msg.role,
-          "content": msg.content
-        })
+        if msg.role in ['user', 'assistant']:
+          content = msg.content
+          if isinstance(content, str):
+            content = content.strip()
+          history.append({
+            "role": msg.role,
+            "content": content
+          })
       else:
-        history.append(msg)
+        if msg.get('role') in ['user', 'assistant']:
+          content = msg.get('content', '')
+          if isinstance(content, str):
+            content = content.strip()
+          history.append({
+            "role": msg['role'],
+            "content": content
+          })
 
     logging.info(f'Latest message to LLM: {history[-1]}')
     
@@ -126,6 +132,7 @@ def llm_call_with_tools(model: str, messages: List[Message]) -> Any:
   handler = LLMHandler(model)
   return handler.call(messages)
 
+
 def handle_tool_calls(message: Any, gpt_messages: List, messages: List, kernel_client: Any) -> Dict | None:
   tool_uses = [c for c in message.content if c.type == "tool_use"]
   if not tool_uses:
@@ -134,27 +141,40 @@ def handle_tool_calls(message: Any, gpt_messages: List, messages: List, kernel_c
     return {'final_response': message.content[0].text}
 
   function_call = tool_uses[0]
+  tool_result_content = []
+  result_data = {}
+
   if function_call.name == "execute_code_in_notebook":
     result = ToolHandler.handle_code(function_call, kernel_client)
-    messages.append(Message('assistant', result['display_code'], collapsible=True))
-    messages[-1].content += f'\n```bash\n{result["tool_response"]["content"]}\n```'
-    messages.extend(result['user_messages'])
-    
-    gpt_messages.append(message)
-    gpt_messages.append(result['tool_response'])
-    gpt_messages.extend([{"role": m.role, "content": m.content} for m in result['user_messages']])
-    
-    return {
+    result_data = {
       'code': result['code'],
       'display_code': result['display_code'],
-      'output': f'```bash\n{result["tool_response"]["content"]}\n```',
+      'output': f'```bash\n{result["tool_output"]}\n```',
       'images': result['user_messages']
     }
+    
+    # Build proper tool result content
+    tool_result_content.append({"type": "text", "text": result["tool_output"]})
+    for img_msg in result['user_messages']:
+      tool_result_content.extend(img_msg.content)
 
   elif function_call.name == "search_brave":
     result = ToolHandler.handle_search(function_call)
-    gpt_messages.append(message)
-    gpt_messages.append(result['tool_response'])
-    return {'search_sources': result['search_sources']}
+    result_data = {'search_sources': result['search_sources']}
+    tool_result_content.append({"type": "text", "text": result['tool_output']})
 
-  return None
+  # Create proper tool result message
+  tool_result_msg = {
+    "role": "user",
+    "content": [{
+      "type": "tool_result",
+      "tool_use_id": function_call.id,
+      "content": tool_result_content
+    }]
+  }
+
+  # Append to both message lists
+  messages.append(Message(role="user", content=tool_result_msg["content"]))
+  gpt_messages.append(message.model_dump())
+  gpt_messages.append(tool_result_msg)
+  return result_data
