@@ -1,8 +1,7 @@
-FROM python:3.10-slim-bullseye
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Install necessary build dependencies
 RUN apt-get update && apt-get install -y \
     git \
     make \
@@ -28,18 +27,30 @@ RUN apt-get update && apt-get install -y \
     gfortran && \
     rm -rf /var/lib/apt/lists/*
 
-COPY base_requirements.txt ./base_requirements.txt
+COPY base_requirements.txt requirements.txt ./
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-# Upgrade pip and install packages with increased timeout
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --default-timeout=100 -r base_requirements.txt
-
-
-
-COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-cache -r base_requirements.txt -r requirements.txt
 
 COPY streamlit_chatbot.py .
+COPY src ./src
 RUN mkdir data
+
+FROM python:3.10-slim-bookworm
+
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app /app
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+
+ENV PATH="/app/.venv/bin:$PATH"
 
 CMD ["python", "-m", "streamlit", "run", "streamlit_chatbot.py"]
