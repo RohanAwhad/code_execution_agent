@@ -50,7 +50,7 @@ class Message:
 class ToolHandler:
   @staticmethod
   def handle_code(function_call: Any, kernel_client: Any) -> Dict:
-    args = json.loads(function_call.function.arguments)
+    args = function_call.input  # Updated to use ToolUseBlock input directly
     code = args.get('code', '')
     display_code = f'```python\n{code}\n```'
     
@@ -76,7 +76,7 @@ class ToolHandler:
 
   @staticmethod
   def handle_search(function_call: Any) -> Dict:
-    args = json.loads(function_call.function.arguments)
+    args = function_call.input  # Updated to use ToolUseBlock input directly
     try:
       results = search_brave(args.get('query', ''))
       content = "\n\n".join(str(r) for r in results)
