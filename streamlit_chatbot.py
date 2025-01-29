@@ -170,6 +170,15 @@ class Message:
 
 
 def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding openai chat completion object is crazy
+  SYSTEM_PROMPT = '''
+You are a language model. Your task is to answer users queries. You have access to internet search and python code execution.
+
+Search internet when the user asks, or you are stuck in debugging the python code. Always write small chunks of code so that they are quickly executed and you can iterate on the errors fast. You can install packages on the system, pip and apt packages.
+
+The environment is only CPU-based, so keep that in mind. All the data related to computation given from the user will be kept in `./data` dir, and you should output also in that dir only.
+
+Never use tqdm.
+  '''.strip()
   history = []
   for msg in messages:
     if dataclasses.is_dataclass(msg):
@@ -182,7 +191,7 @@ def llm_call_with_tools(model: str, messages: list[Message]) -> Any:  # finding 
   client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
   return client.chat.completions.create(
       model=model,
-      messages=history,
+      messages=[{'role': 'system', 'content': SYSTEM_PROMPT},] + history,
       tools=tools,
       tool_choice="auto",
       temperature=0.8,
@@ -280,12 +289,7 @@ def load_conversation(key: str) -> None:
     st.session_state.chat_session_key = key
 
 
-def create_messaging_window() -> None:
-  st.title("Chat with AI and Code Execution")
-
-  if 'global_messages' not in st.session_state:
-    st.session_state.global_messages: Dict[str, List[Message]] = load_global_messages_from_disk()
-
+def add_clear_chat_button() -> None:
   clear_chat_button: bool = st.sidebar.button("Clear Chat")
   if clear_chat_button:
     st.session_state.messages = []
@@ -295,18 +299,47 @@ def create_messaging_window() -> None:
     st.session_state.kernel_client = None
     st.session_state.chat_session_key = None
 
-  if 'messages' not in st.session_state:
-    st.session_state.messages: List[Message] = []
 
-  if 'gpt_messages' not in st.session_state:
-    st.session_state.gpt_messages: List[Any] = []
+def let_user_add_env_keys() -> None:
+  st.sidebar.header("Environment Variables")
+  new_key: str = st.sidebar.text_input("Key")
+  new_value: str = st.sidebar.text_input("Value", type="password")
 
+  if 'env_keys' not in st.session_state:
+    st.session_state.env_keys = {}
+
+  if st.sidebar.button("Add Key"):
+    if new_key and new_value:
+      os.environ[new_key] = new_value
+      st.session_state.env_keys[new_key] = new_value
+      st.sidebar.success(f"Added {new_key}")
+    else:
+      st.sidebar.error("Please provide both key and value")
+
+  for key, value in st.session_state.env_keys.items():
+    masked_value: str = '*' * 5
+    st.sidebar.write(f"{key}: {masked_value}")
+
+
+def list_prev_conv_threads() -> None:
   st.sidebar.write("Previous conversations:")
   for key in st.session_state.global_messages.keys():
     btn_name: str = key if len(key) < 20 else f'{key[:17]} ...'
     btn_name = btn_name.ljust(21)
     if st.sidebar.button(btn_name, key=key, on_click=load_conversation, args=(key,)):
       pass
+
+def create_messaging_window() -> None:
+  st.title("Chat with AI and Code Execution")
+
+  if 'global_messages' not in st.session_state: st.session_state.global_messages: Dict[str, List[Message]] = load_global_messages_from_disk()
+  if 'messages' not in st.session_state: st.session_state.messages: List[Message] = []
+  if 'gpt_messages' not in st.session_state: st.session_state.gpt_messages: List[Any] = []
+
+  # sidebar
+  let_user_add_env_keys()
+  add_clear_chat_button()
+  list_prev_conv_threads()
 
   for message in st.session_state.messages:
     if dataclasses.is_dataclass(message):

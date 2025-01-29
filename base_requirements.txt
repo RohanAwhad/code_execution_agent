@@ -1,0 +1,17 @@
+openai
+numpy
+pandas
+matplotlib
+requests
+seaborn
+scikit-learn
+jupyter
+ipython
+scipy
+plotly
+beautifulsoup4
+pypdf
+pyyaml
+streamlit
+pydantic
+pillow
