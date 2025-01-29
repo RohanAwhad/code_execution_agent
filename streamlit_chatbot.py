@@ -139,8 +139,7 @@ def create_messaging_window() -> None:
 
     while True:
       with st.spinner('Calling AI ...'):
-        ai_response = llm_call_with_tools("claude-3-5-sonnet-20241022", st.session_state.gpt_messages)
-      assistant_message = ai_response.choices[0].message
+        assistant_message = llm_call_with_tools("claude-3-5-sonnet-20241022", st.session_state.gpt_messages)
       result = handle_tool_calls(assistant_message, st.session_state.gpt_messages, st.session_state.messages, st.session_state.kernel_client)
       if not result: continue
 
