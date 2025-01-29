@@ -3,35 +3,32 @@ import os
 import json
 import logging
 from typing import Any, Dict, List
-import openai
+from anthropic import Anthropic
 
 from src.tools.code_executor import execute_code_in_notebook
 from src.tools.web_search import search_brave
 
 # Config
-TOOLS = [{
-  "type": "function",
-  "function": {
-    "name": "execute_code_in_notebook",
-    "description": "Execute Python code in a Jupyter notebook environment.",
-    "parameters": {
-      "type": "object", 
-      "properties": {"code": {"type": "string", "description": "Python code"}},
-      "required": ["code"]
+TOOLS = [
+    {
+        "name": "execute_code_in_notebook",
+        "description": "Execute Python code in a Jupyter notebook environment.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"code": {"type": "string", "description": "Python code"}},
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "search_brave",
+        "description": "Search using Brave Search API",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search query"}},
+            "required": ["query"]
+        }
     }
-  }
-}, {
-  "type": "function",
-  "function": {
-    "name": "search_brave",
-    "description": "Search using Brave Search API",
-    "parameters": {
-      "type": "object",
-      "properties": {"query": {"type": "string", "description": "Search query"}},
-      "required": ["query"]
-    }
-  }
-}]
+]
 
 SYSTEM_PROMPT = '''
 You are a language model. Your task is to answer users queries. You have access to internet search and python code execution.
@@ -100,7 +97,7 @@ class ToolHandler:
 class LLMHandler:
   def __init__(self, model: str):
     self.model = model
-    self.client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    self.client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     self.tool_handler = ToolHandler()
     
   def call(self, messages: List[Message]) -> Any:
@@ -116,14 +113,13 @@ class LLMHandler:
 
     logging.info(f'Latest message to LLM: {history[-1]}')
     
-    return self.client.chat.completions.create(
+    return self.client.messages.create(
       model=self.model,
-      messages=[{'role': 'system', 'content': SYSTEM_PROMPT}] + history,
+      system=SYSTEM_PROMPT,
+      messages=history,
       tools=TOOLS,
-      tool_choice="auto",
-      temperature=0.8,
       max_tokens=4096,
-      parallel_tool_calls=False
+      temperature=0.8
     )
 
 def llm_call_with_tools(model: str, messages: List[Message]) -> Any:
@@ -131,13 +127,14 @@ def llm_call_with_tools(model: str, messages: List[Message]) -> Any:
   return handler.call(messages)
 
 def handle_tool_calls(message: Any, gpt_messages: List, messages: List, kernel_client: Any) -> Dict | None:
-  if not message.tool_calls:
-    messages.append(Message(role="assistant", content=message.content))
-    gpt_messages.append({"role": "assistant", "content": message.content})
-    return {'final_response': message.content}
+  tool_uses = [c for c in message.content if c.type == "tool_use"]
+  if not tool_uses:
+    messages.append(Message(role="assistant", content=message.content[0].text))
+    gpt_messages.append({"role": "assistant", "content": message.content[0].text})
+    return {'final_response': message.content[0].text}
 
-  function_call = message.tool_calls[0]
-  if function_call.function.name == "execute_code_in_notebook":
+  function_call = tool_uses[0]
+  if function_call.name == "execute_code_in_notebook":
     result = ToolHandler.handle_code(function_call, kernel_client)
     messages.append(Message('assistant', result['display_code'], collapsible=True))
     messages[-1].content += f'\n```bash\n{result["tool_response"]["content"]}\n```'
@@ -154,7 +151,7 @@ def handle_tool_calls(message: Any, gpt_messages: List, messages: List, kernel_c
       'images': result['user_messages']
     }
 
-  elif function_call.function.name == "search_brave":
+  elif function_call.name == "search_brave":
     result = ToolHandler.handle_search(function_call)
     gpt_messages.append(message)
     gpt_messages.append(result['tool_response'])
