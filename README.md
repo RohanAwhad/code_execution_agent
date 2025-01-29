@@ -1,10 +1,10 @@
 Chatbot with Code Execution and Web Search Integration
 
-This repository provides a Streamlit-based chatbot that integrates AI-powered chat functionality, Python code execution in a Jupyter notebook environment, and web search capabilities via the Brave Search API. The bot allows users to interact in a conversational format, upload various file types, execute Python code, and retrieve web search results. The key components include OpenAI’s GPT models, Jupyter for live code execution, and Streamlit for the frontend interface.
+This repository provides a Streamlit-based chatbot that integrates AI-powered chat functionality, Python code execution in a Jupyter notebook environment, and web search capabilities via the Brave Search API. The bot allows users to interact in a conversational format, upload various file types, execute Python code, and retrieve web search results. The key components include Anthropic’s Claude models, Jupyter for live code execution, and Streamlit for the frontend interface.
 
 Features
 
-1.	AI-Powered Chat Interface: Users can converse with the chatbot, ask questions, and receive responses from GPT models powered by OpenAI.
+1.	AI-Powered Chat Interface: Users can converse with the chatbot, ask questions, and receive responses from Claude models powered by Anthropic.
 2.	Python Code Execution: Users can input Python code directly in the chat, which is executed in a Jupyter notebook backend, and the results or generated plots are returned within the chat interface.
 3.	File Upload Support:
 	•	Images (.png, .jpg, .jpeg)
@@ -23,7 +23,7 @@ Make sure you have the following installed on your system:
 
 	•	Python 3.8+
 	•	Docker (for running in a container)
-	•	OpenAI API Key
+	•	Anthropic API Key
 	•	Brave Search API Key
 
 Local Setup
@@ -45,7 +45,7 @@ pip install -r requirements.txt
 
 Create a .env file in the root of the project and include your API keys:
 
-OPENAI_API_KEY=your_openai_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
 BRAVE_SEARCH_AI_API_KEY=your_brave_search_api_key
 
 	4.	Run the Streamlit App:
@@ -74,7 +74,7 @@ This script will:
 
 	•	Create the necessary data and history directories for storing files and chat history.
 	•	Build the Docker image and run it, exposing port 8501 for the Streamlit interface.
-	•	Pass the OpenAI API key as an environment variable to the container.
+	•	Pass the API keys as environment variables to the container.
 
 Once the container is running, you can access the application at http://localhost:8501.
 
@@ -90,13 +90,13 @@ fi
 if [ ! -d "history" ]; then
     mkdir history
 fi
-docker build -t code_execution_agent . && docker run -p8501:8501 --rm -e OPENAI_API_KEY=$OPENAI_API_KEY -v "$(pwd)/data:/app/data" -v "$(pwd)/history:/app/history" code_execution_agent
+docker build -t code_execution_agent . && docker run -p8501:8501 --rm -e BRAVE_SEARCH_AI_API_KEY=$BRAVE_SEARCH_AI_API_KEY -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY -v "$(pwd)/data:/app/data" -v "$(pwd)/history:/app/history" code_execution_agent
 
 	•	Creates Directories: Checks if the data and history directories exist, and if not, it creates them.
 	•	Builds Docker Image: Builds a Docker image named code_execution_agent from the current directory.
 	•	Runs the Docker Container: The container is run with the following options:
 	•	Exposes port 8501 for the Streamlit app.
-	•	Passes the OpenAI API key as an environment variable.
+	•	Passes the API keys as environment variables.
 	•	Mounts local data and history directories into the container for persistent file and chat history storage.
 	•	Automatically removes the container when stopped.
 
@@ -104,7 +104,7 @@ Usage
 
 Chat Interface
 
-	•	Interact with the AI: Type a message in the input box, and the chatbot will respond using GPT. The AI can answer general questions, provide explanations, or assist with coding tasks.
+	•	Interact with the AI: Type a message in the input box, and the chatbot will respond using Claude. The AI can answer general questions, provide explanations, or assist with coding tasks.
 
 Code Execution
 

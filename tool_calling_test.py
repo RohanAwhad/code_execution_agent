@@ -1,130 +1,138 @@
-import jupyter_client
-import json
-import openai
-import time
+import anthropic
+import os
 
-from typing import Any, Dict, List
+from typing import Any
 from jupyter_client.manager import KernelManager
 
-# Global variable to hold the kernel manager
 kernel_manager: KernelManager = None
 
-
 def execute_code_in_notebook(code: str) -> list[Any]:
-  if not code:
-    return []
+    if not code:
+        return []
 
-  global kernel_manager
-  # Create a kernel if it doesn't exist
-  if kernel_manager is None:
-    kernel_manager = KernelManager()
-    kernel_manager.start_kernel()
+    global kernel_manager
+    if kernel_manager is None:
+        kernel_manager = KernelManager()
+        kernel_manager.start_kernel()
 
-  # Create a client for the kernel
-  kernel_client = kernel_manager.client()
-  kernel_client.start_channels()
-  kernel_client.wait_for_ready()
-  kernel_client.execute(code)
+    kernel_client = kernel_manager.client()
+    kernel_client.start_channels()
+    kernel_client.wait_for_ready()
+    kernel_client.execute(code)
 
-  output_content: str = ""
-  outputs: list[Any] = []
-  while True:
-    try:
-      msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=5)
-      if msg['msg_type'] == 'execute_result':
-        outputs.append(msg['content']['data']['text/plain'])
-      elif msg['msg_type'] == 'display_data':
-        if 'image/png' in msg['content']['data']:
-          outputs.append({'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + msg['content']['data']['image/png']}})
-      elif msg['msg_type'] == 'stream':
-        output_content += msg['content']['text']
-      elif msg['msg_type'] == 'error':
-        outputs.append("\n".join(msg['content']['traceback']))
-    except Exception as e:
-      print(f"An error occurred: {e}")
-      break
+    output_content: str = ""
+    outputs: list[Any] = []
+    while True:
+        try:
+            msg: dict[str, Any] = kernel_client.get_iopub_msg(timeout=5)
+            if msg['msg_type'] == 'execute_result':
+                outputs.append(msg['content']['data']['text/plain'])
+            elif msg['msg_type'] == 'display_data' and 'image/png' in msg['content']['data']:
+                outputs.append({'type': 'image_url', 'image_url': {'url': f"data:image/png;base64,{msg['content']['data']['image/png']}"}})
+            elif msg['msg_type'] == 'stream':
+                output_content += msg['content']['text']
+            elif msg['msg_type'] == 'error':
+                outputs.append("\n".join(msg['content']['traceback']))
+        except Exception as e:
+            print(f"Error: {e}")
+            break
 
-  if output_content:
-    outputs.append(output_content)
-  return outputs
-
+    if output_content:
+        outputs.append(output_content)
+    return outputs
 
 def shutdown_kernel() -> None:
-  global kernel_manager
-  if kernel_manager is not None:
-    kernel_manager.shutdown_kernel()
-    kernel_manager = None
+    global kernel_manager
+    if kernel_manager is not None:
+        kernel_manager.shutdown_kernel()
+        kernel_manager = None
 
-
-# ===
-# LLM
-# ===
 tools = [
     {
-        "type": "function",
-        "function": {
-            "name": "execute_code_in_notebook",
-            "description": "Execute Python code in a Jupyter notebook environment. The notebook state is preserved for the entire session of conversation so you can call previous function without defining them again.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "The Python code to be executed."
-                    }
-                },
-                "required": ["code"]
-            }
+        "name": "execute_code_in_notebook",
+        "description": "Execute Python code in Jupyter notebook with persistent state",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python code to execute"}
+            },
+            "required": ["code"]
         }
     }
 ]
-client = openai.OpenAI()
-messages = [{"role": "system", "content": "You are a helpful assistant that can execute Python code in a Jupyter notebook environment."}]
+
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+system_prompt = "You are an assistant that executes Python code in a Jupyter notebook environment."
+messages = []
+last_assistant_message = None
+
 while True:
-  try:
-    user_input = input('Enter your message:')
-    messages.append({'role': 'user', 'content': user_input})
-    response = client.chat.completions.create(
-        model="gpt-4o-2024-08-06",
-        messages=messages,
-        tools=tools,
-        tool_choice="auto"
-    )
+    try:
+        user_input = input('Enter your message: ')
+        messages.append({"role": "user", "content": user_input})
+        
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            system=system_prompt,
+            messages=messages,
+            tools=tools,
+            max_tokens=1024
+        )
+        
+        last_assistant_message = response.content
+        print("Assistant response:")
+        tool_uses = []
+        
+        for content_block in last_assistant_message:
+            if content_block.type == 'text':
+                print(content_block.text)
+            elif content_block.type == 'tool_use':
+                tool_uses.append(content_block)
+                print(f"Tool use detected: {content_block.name}")
 
-    # Process the response
-    assistant_message = response.choices[0].message
-    messages.append(assistant_message)
-    print(assistant_message)
-    if assistant_message.tool_calls:
-      for function_call in assistant_message.tool_calls:
-        if function_call.function.name == "execute_code_in_notebook":
-          args = json.loads(function_call.function.arguments)
-          code_result = execute_code_in_notebook(args.get('code', ''))
+        messages.append({
+            "role": "assistant",
+            "content": last_assistant_message
+        })
 
-          # Prepare tool response based on the result
-          tool_call_response = {"role": "tool", "tool_call_id": function_call.id, "content": ""}
-          user_messages = []
-          for output in code_result:
-            if isinstance(output, dict) and 'type' in output and output['type'] == 'image_url':
-              user_messages.append({'role': 'user', 'content': [output]})
-            else:
-              tool_call_response["content"] += str(output) + "\n"
-
-          # If no non-image output, still add an empty tool call response
-          if not tool_call_response["content"].strip():
-            tool_call_response["content"] = "No textual output from execution."
-          messages.extend([tool_call_response] + user_messages)
-
-      # Make another API call to process the function result
-      second_response = client.chat.completions.create(
-          model="gpt-4o-2024-08-06",
-          messages=messages
-      )
-      print(second_response.choices[0].message.content)
-      messages.append(second_response.choices[0].message)
-    else:
-      print(assistant_message.content)
-  except KeyboardInterrupt:
-    break
+        if tool_uses:
+            tool_results = []
+            for tool_use in tool_uses:
+                if tool_use.name == "execute_code_in_notebook":
+                    code = tool_use.input.get('code', '')
+                    results = execute_code_in_notebook(code)
+                    content = "\n".join(str(r) for r in results)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": content
+                    })
+            
+            if tool_results:
+                messages.append({
+                    "role": "user",
+                    "content": tool_results
+                })
+                
+                follow_up = client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=1024
+                )
+                
+                print("\nFollow-up response:")
+                for block in follow_up.content:
+                    if block.type == 'text':
+                        print(block.text)
+                
+                messages.append({
+                    "role": "assistant", 
+                    "content": follow_up.content
+                })
+            
+    except KeyboardInterrupt:
+        break
 
 shutdown_kernel()
